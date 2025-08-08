@@ -42,6 +42,10 @@ class PipelineConfig:
     # Callback hooks
     on_progress: Optional[callable] = None  # (stage: str, value: float, message: str) -> None
     on_preview: Optional[callable] = None   # (stage: str, sample: list[str]) -> None
+    on_metrics: Optional[callable] = None   # (stage: str, payload: dict) -> None
+    # Exporter flags surfaced to UI
+    watermark_texts: bool = False
+    ascii_safe_json: bool = False
 
 
 class PipelineManager:
@@ -72,6 +76,13 @@ class PipelineManager:
             except Exception:
                 pass
 
+    def _emit_metrics(self, stage: str, payload: dict) -> None:
+        if self.config.on_metrics:
+            try:
+                self.config.on_metrics(stage, payload)
+            except Exception:
+                pass
+
     def run(self) -> bool:
         LOGGER.info("Starting pipeline")
         if self._check_cancel():
@@ -83,6 +94,7 @@ class PipelineManager:
         docs = import_documents(self.config.input_paths)
         self._emit_progress("import", 1.0, f"Imported {len(docs)} items")
         self._emit_preview("import", [d.text[:400] for d in docs[:5]])
+        self._emit_metrics("import", {"raw_count": len(docs)})
         LOGGER.info("Imported %d raw items", len(docs))
         if self._check_cancel():
             return False
@@ -105,6 +117,12 @@ class PipelineManager:
         )
         self._emit_progress("clean", 1.0, f"Cleaned: {len(docs)} remain")
         self._emit_preview("clean", [d.text[:400] for d in docs[:5]])
+        # language distribution
+        lang_dist: dict[str, int] = {}
+        for d in docs:
+            if d.language:
+                lang_dist[d.language] = lang_dist.get(d.language, 0) + 1
+        self._emit_metrics("clean", {"clean_count": len(docs), "language_distribution": lang_dist})
         LOGGER.info("Kept %d documents after cleaning", len(docs))
         if self._check_cancel():
             return False
@@ -127,8 +145,13 @@ class PipelineManager:
         else:
             model_dir = self.config.sentencepiece_model_path or (self.config.output_dir / "spm")
             sp_model = train_or_load_sp_model((d.text for d in docs), model_dir)
-        chunks = tokenize_and_chunk(docs, sp_model, self.config.chunk_size)
+        def tok_prog(done: int, total: int) -> None:
+            frac = min(1.0, max(0.0, done / max(1, total)))
+            self._emit_progress("tokenize", frac, f"Tokenizing {done}/{total}")
+
+        chunks = tokenize_and_chunk(docs, sp_model, self.config.chunk_size, on_progress=tok_prog)
         self._emit_progress("tokenize", 1.0, f"Chunks: {len(chunks)}")
+        self._emit_metrics("tokenize", {"chunk_count": len(chunks)})
         LOGGER.info("Created %d chunks", len(chunks))
         if self._check_cancel():
             return False
@@ -136,9 +159,22 @@ class PipelineManager:
         # Export
         LOGGER.info("Exporting...")
         self._emit_progress("export", 0.0, "Starting export")
-        stats = export_all(self.config.output_dir, docs, chunks, self.config.export_formats)
+        stats = export_all(
+            self.config.output_dir,
+            docs,
+            chunks,
+            self.config.export_formats,
+            watermark_texts=self.config.watermark_texts,
+            ascii_safe_json=self.config.ascii_safe_json,
+        )
         self._emit_progress("export", 1.0, "Export finished")
         LOGGER.info("Export complete: %s", self.config.output_dir)
+        self._emit_metrics("export", {
+            "output_dir": str(self.config.output_dir),
+            "dataset_hash": stats.dataset_hash,
+            "num_documents": stats.num_documents,
+            "num_tokens": stats.num_tokens,
+        })
 
         # Record metadata
         insert_dataset(

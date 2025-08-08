@@ -24,16 +24,16 @@ def _compute_dataset_hash(texts: Iterable[str]) -> str:
 
 
 def _watermark_text(text: str, watermark_hex: str) -> str:
-    # Encode hex as invisible characters
+    # Make watermark optional for JSON-friendly outputs by escaping invisibles
     bitstream = "".join(f"{int(ch, 16):04b}" for ch in watermark_hex)
-    water = []
+    water_chars = []
     for i, ch in enumerate(text):
         if i < len(bitstream):
             marker = ZERO_WIDTH_SPACE if bitstream[i] == "0" else ZERO_WIDTH_JOINER
-            water.append(ch + marker)
+            water_chars.append(ch + marker)
         else:
-            water.append(ch)
-    return "".join(water)
+            water_chars.append(ch)
+    return "".join(water_chars)
 
 
 def export_all(
@@ -41,6 +41,8 @@ def export_all(
     documents: List[Document],
     chunks: List[TokenizedChunk],
     formats: List[str],
+    watermark_texts: bool = True,
+    ascii_safe_json: bool = False,
 ) -> DatasetStats:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -54,27 +56,41 @@ def export_all(
     # Exports
     if "jsonl" in formats:
         with open(output_dir / "dataset.jsonl", "w", encoding="utf-8") as f:
-            for d in documents:
-                wt = _watermark_text(d.text, dataset_hash[:16])
-                f.write(json.dumps({"text": wt, "language": d.language}) + "\n")
+            for i, d in enumerate(documents):
+                text_out = _watermark_text(d.text, dataset_hash[:16]) if watermark_texts else d.text
+                f.write(json.dumps({
+                    "id": i,
+                    "text": text_out,
+                    "language": d.language,
+                    "length_chars": len(d.text or ""),
+                }, ensure_ascii=ascii_safe_json) + "\n")
 
     if "txt" in formats:
         with open(output_dir / "dataset.txt", "w", encoding="utf-8") as f:
             for d in documents:
-                f.write(_watermark_text(d.text, dataset_hash[:16]) + "\n")
+                text_out = _watermark_text(d.text, dataset_hash[:16]) if watermark_texts else d.text
+                f.write(text_out + "\n")
 
     if "csv" in formats:
-        df = pd.DataFrame({"text": texts, "language": [d.language for d in documents]})
+        df = pd.DataFrame({"text": [(_watermark_text(t, dataset_hash[:16]) if watermark_texts else t) for t in texts], "language": [d.language for d in documents]})
         df.to_csv(output_dir / "dataset.csv", index=False)
 
     if "parquet" in formats:
-        df = pd.DataFrame({"text": texts, "language": [d.language for d in documents]})
-        df.to_parquet(output_dir / "dataset.parquet", index=False)
+        df = pd.DataFrame({"text": [(_watermark_text(t, dataset_hash[:16]) if watermark_texts else t) for t in texts], "language": [d.language for d in documents]})
+        try:
+            df.to_parquet(output_dir / "dataset.parquet", index=False)
+        except Exception:
+            # fallback to CSV if pyarrow or engine issues
+            df.to_csv(output_dir / "dataset.parquet.csv", index=False)
 
     # Token dumps (optional)
     with open(output_dir / "chunks.jsonl", "w", encoding="utf-8") as f:
         for c in chunks:
-            f.write(json.dumps({"tokens": c.tokens, "text": c.text}) + "\n")
+            f.write(json.dumps({
+                "num_tokens": len(c.tokens),
+                "tokens": c.tokens,
+                "text": c.text,
+            }) + "\n")
 
     stats = DatasetStats(
         num_documents=len(documents),
