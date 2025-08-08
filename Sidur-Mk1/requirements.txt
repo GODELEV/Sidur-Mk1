@@ -1,0 +1,12 @@
+flet>=0.23.2
+pandas>=2.0.0
+numpy>=1.24.0
+datasets>=2.19.0
+sentencepiece>=0.1.99
+fasttext-wheel>=0.9.2
+pyarrow>=14.0.0
+pyAesCrypt
+pycryptodome
+datasketch>=1.6.4
+nltk>=3.9
+tqdm>=4.66.0
